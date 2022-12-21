@@ -1,0 +1,17 @@
+trainer:
+  devices: 1
+  accelerator: gpu
+  min_epochs: 5
+  max_epochs: 20
+  benchmark: True
+experiment:
+  name: "s1_linear_regression"
+  task:
+    model_name: "s1_linear_regression"
+    learning_rate: 1e-4
+    learning_rate_schedule_patience: 6
+  datamodule:
+    root_dir: ${program.data_dir}
+    batch_size: 8
+    num_workers: 8
+    use_tiny_subset: False
