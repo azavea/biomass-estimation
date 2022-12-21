@@ -1,0 +1,12 @@
+config_file: null  # This lets the user pass a config filename to load other arguments from
+
+program:  # These are the arguments that define how the train.py script works
+  seed: 0
+  output_dir: output
+  log_dir: ${program.output_dir}/logs
+  data_dir: data
+  s3_output_uri: ""
+  overwrite: False
+  train: True
+  predict: True
+

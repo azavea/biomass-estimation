@@ -1,8 +1,10 @@
+from typing import Any, Dict, Optional
 import os
 from os.path import join, isfile, basename
 import random
 from multiprocessing.pool import ThreadPool
 import warnings
+import logging
 
 from tqdm.autonotebook import tqdm
 import s3fs
@@ -11,9 +13,10 @@ import matplotlib
 import pandas
 import numpy as np
 import rasterio
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader, Subset
 import torch
 import torch.nn as nn
+import pytorch_lightning as pl
 
 us_s3_uri = 's3://drivendata-competition-biomassters-public-us'
 fs = s3fs.S3FileSystem(anon=True)
@@ -26,7 +29,8 @@ class BiomassMetadata():
 
         # I'm not totally sure this is the right order for S1
         self.s1_bands = ['VV Asc', 'VH Asc', 'VV Desc', 'VH Desc']
-        self.s2_bands = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12', 'CLP']
+        self.s2_bands = [
+            'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12', 'CLP']
         self.bands = self.s1_bands + self.s2_bands
         self.months = [
             'September', 'October', 'November', 'December', 'January', 'February',
@@ -36,19 +40,14 @@ class BiomassMetadata():
         return join(root_uri, f'{split}_features/{chip_id}_{satellite}_{month:02}.tif')
 
     def get_label_uri(self, split, chip_id, root_uri=us_s3_uri):
-        if split != 'train':
-            raise Exception('split must be train')
         return join(root_uri, f'{split}_agbm/{chip_id}_agbm.tif')
 
     def get_chip_ids(self, split):
-        chip_ids = self.features_df.query(f'split=="{split}"').chip_id.unique()
-        random.seed(1234)
-        random.shuffle(chip_ids)
-        return chip_ids
+        return self.features_df.query(f'split=="{split}"').chip_id.unique()
 
 
 class BiomassDataset(Dataset):
-    def __init__(self, root_dir, split, chip_ids=None, transform=None, download=False):
+    def __init__(self, root_dir='data', split='train', transform=None):
         if split not in ['train', 'test']:
             raise Exception(f'{split} is not a valid split')
 
@@ -59,16 +58,11 @@ class BiomassDataset(Dataset):
         self.label_dir = join(root_dir, 'train_agbm')
 
         self.split = split
-        self.chip_ids = chip_ids
         self.transform = transform
 
-        if download:
-            self.download_data()
-        else:
-            self.metadata = BiomassMetadata(
-                self.features_metadata_path, self.labels_metadata_path)
-            self.chip_ids = (chip_ids if chip_ids is not None else
-                    self.metadata.get_chip_ids(split))
+        self.metadata = BiomassMetadata(
+            self.features_metadata_path, self.labels_metadata_path)
+        self.chip_ids = self.metadata.get_chip_ids(split)
 
     def __len__(self):
         return len(self.chip_ids)
@@ -135,9 +129,14 @@ class BiomassDataset(Dataset):
             's1_masks': torch.stack(s1_masks),
             's2_masks': torch.stack(s2_masks),
         }
+
         if self.transform:
             x, y = self.transform(x, y)
-        return x, y, chip_metadata
+
+        if y is None:
+            return x, chip_metadata
+        else:
+            return x, y, chip_metadata
 
     def plot_sample(self, x, y, chip_metadata, z=None, out_path=None):
         nrows = x.shape[0] + 1
@@ -189,34 +188,21 @@ class BiomassDataset(Dataset):
         else:
             plt.show()
 
-    def download_data(self):
-        # TODO more robust check of whether data is downloaded
-        if os.path.isfile(self.features_metadata_path):
-            warnings.warn('Skipping dataset download because it appears unnecessary.')
-            return
-
-        fs.download(
-            join(us_s3_uri, 'features_metadata.csv'), self.features_metadata_path)
-        fs.download(
-            join(us_s3_uri, 'train_agbm_metadata.csv'), self.labels_metadata_path)
-        self.metadata = BiomassMetadata(
-            self.features_metadata_path, self.labels_metadata_path)
-        self.chip_ids = (
-            self.chip_ids if self.chip_ids is not None else
-            self.metadata.get_chip_ids(self.split))
-
-        os.makedirs(self.image_dir)
-        os.makedirs(self.label_dir)
+    def download_data(self, chip_ids):
+        os.makedirs(self.root_dir, exist_ok=True)
+        os.makedirs(self.image_dir, exist_ok=True)
+        os.makedirs(self.label_dir, exist_ok=True)
 
         download_tasks = []
-        for chip_id in self.chip_ids:
+        for chip_id in chip_ids:
             for satellite in ['S1', 'S2']:
                 for month in range(0, 12):
-                    image_uri = self.metadata.get_image_uri('train', chip_id, satellite, month)
+                    image_uri = self.metadata.get_image_uri(
+                        self.split, chip_id, satellite, month)
                     image_fn = basename(image_uri)
                     image_path = join(self.image_dir, image_fn)
                     download_tasks.append((image_uri, image_path))
-            label_uri = self.metadata.get_label_uri('train', chip_id)
+            label_uri = self.metadata.get_label_uri(self.split, chip_id)
             label_path = join(self.label_dir, basename(label_uri))
             download_tasks.append((label_uri, label_path))
 
@@ -225,11 +211,15 @@ class BiomassDataset(Dataset):
             if fs.exists(from_uri):
                 fs.download(from_uri, to_path)
 
+        for task in tqdm(download_tasks, desc='Downloading dataset'):
+            download_file(task)
+
+        '''
         pool = ThreadPool(8)
         for _ in tqdm(pool.imap_unordered(download_file, download_tasks),
-                        total=len(download_tasks)):
+                      total=len(download_tasks), desc='Downloading dataset'):
             pass
-
+        '''
 
 class BiomassBandNormalize():
     def __call__(self, x, y):
@@ -252,3 +242,73 @@ class BiomassBandNormalize():
             y = torch.clamp(y, 0, 400)
 
         return x, y
+
+
+# TODO move data normalization and augmentation to GPU
+class BiomassDataModule(pl.LightningDataModule):
+    def __init__(
+            self, root_dir='data', train_ratio=0.8, batch_size: int = 8,
+            num_workers: int = 4, use_tiny_subset=False) -> None:
+        super().__init__()
+        self.root_dir = root_dir
+        self.train_ratio = train_ratio
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.use_tiny_subset = use_tiny_subset
+
+    def setup(self, stage: Optional[str] = None) -> None:
+        """Initialize the main ``Dataset`` objects.
+
+        This method is called once per GPU per run.
+
+        Args:
+            stage: stage to set up
+        """
+        transform = BiomassBandNormalize()
+        all_train_dataset = BiomassDataset(
+            root_dir=self.root_dir, split='train', transform=transform)
+        if self.use_tiny_subset:
+            all_train_dataset = Subset(all_train_dataset, list(range(10)))
+        all_train_inds = list(range(len(all_train_dataset)))
+        train_sz = round(self.train_ratio * len(all_train_inds))
+
+        self.train_dataset = Subset(all_train_dataset, all_train_inds[0:train_sz])
+        self.val_dataset = Subset(all_train_dataset, all_train_inds[train_sz:])
+
+        self.predict_dataset = BiomassDataset(
+            root_dir=self.root_dir, split='test', transform=transform)
+        if self.use_tiny_subset:
+            self.predict_dataset = Subset(self.predict_dataset, list(range(5)))
+
+    def train_dataloader(self) -> DataLoader[Any]:
+        """Return a DataLoader for training.
+
+        Returns:
+            training data loader
+        """
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=True,
+        )
+
+    def val_dataloader(self) -> DataLoader[Any]:
+        """Return a DataLoader for validation.
+        Returns:
+            validation data loader
+        """
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=False,
+        )
+
+    def predict_dataloader(self) -> DataLoader[Any]:
+        return DataLoader(
+            self.predict_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            shuffle=False,
+        )
