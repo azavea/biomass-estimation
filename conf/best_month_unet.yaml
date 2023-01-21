@@ -1,0 +1,29 @@
+trainer:
+  devices: 1
+  accelerator: gpu
+  min_epochs: 5
+  max_epochs: 20
+  benchmark: True
+experiment:
+  name: "best_month_unet"
+  task:
+    model_name: "unet"
+    model_args:
+      in_channels: 15
+      encoder_name: "resnet18"
+    learning_rate: 1e-3
+    learning_rate_schedule_patience: 5
+  datamodule:
+    root_dir: ${program.data_dir}
+    train_ratio: 0.8
+    batch_size: 20
+    num_workers: 4
+    dataset_limit: None
+    use_best_month: True
+    month_items: True
+    transforms:
+      - name: sentinel_band_normalize
+      - name: select_bands
+        bands: all
+      - name: aggregate_months
+        agg_fn: "mean"
