@@ -103,8 +103,10 @@ def main(conf: DictConfig) -> None:
                     zipf.write(join(root, fn), arcname=fn)
         shutil.rmtree(pred_dir)
 
-    s3 = s3fs.S3FileSystem()
-    s3.put(conf.program.output_dir, conf.program.s3_output_dir, recursive=True)
+    if conf.program.s3_output_uri:
+        s3 = s3fs.S3FileSystem()
+        s3.put(conf.program.output_dir,
+               join(conf.program.s3_output_uri, conf.experiment.name), recursive=True)
 
 
 if __name__ == '__main__':

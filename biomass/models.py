@@ -8,9 +8,10 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import BasePredictionWriter
 import rasterio
+import segmentation_models_pytorch as smp
 
 
-class LinearPixelRegression(nn.Module):
+class PixelLinearRegression(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 1)
@@ -19,14 +20,55 @@ class LinearPixelRegression(nn.Module):
         return self.conv1(x)
 
 
-class S1MeanWrapper(nn.Module):
-    def __init__(self, model):
+class PixelMLP(nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels):
         super().__init__()
-        self.model = model
+        self.mlp = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_channels, 1),
+            nn.ReLU(),
+            nn.Conv2d(hidden_channels, out_channels, 1))
 
     def forward(self, x):
-        x = x[:, :, 0:4, :, :].mean(1)
-        return self.model(x)
+        return self.mlp(x)
+
+
+class TemporalUNet(nn.Module):
+    def __init__(self, in_channels, encoder_name='resnet18', agg_method='month_mean'):
+        super().__init__()
+        self.agg_method = agg_method
+        aux_params = (
+            {'classes': 1, 'activation': None}
+            if agg_method == 'month_attn' else None)
+        self.unet = smp.Unet(
+            encoder_name=encoder_name, in_channels=in_channels, encoder_weights=None,
+            classes=1, activation=None, aux_params=aux_params)
+
+    def forward(self, x):
+        # x: (batch_sz, time, channels, height, width)
+        if self.agg_method == 'month_mean':
+            z = self.unet(x.reshape(-1, *x.shape[2:]))
+            # z: (batch_sz * time, 1, height, width)
+            z = z.reshape(*x.shape[0:2], 1, *x.shape[3:])
+            # z: (batch_sz, time, 1, height, width)
+            z = z.mean(dim=1)
+            # z: (batch_sz, 1, height, width)
+        elif self.agg_method == 'month_attn':
+            z, logits = self.unet(x.reshape(-1, *x.shape[2:]))
+            # z: (batch_sz * time, 1, height, width)
+            # logits: (batch_sz * time, 1)
+            z = z.reshape(*x.shape[0:2], 1, *x.shape[3:])
+            logits = logits.reshape(*x.shape[0:2], 1)
+            # z: (batch_sz, time, 1, height, width)
+            # logits: (batch_sz, time, 1)
+            probs = torch.softmax(logits, dim=1)
+            # probs: (batch_sz, time, 1)
+            probs = probs.unsqueeze(-1).unsqueeze(-1)
+            # probs: (batch_sz, time, 1, 1, 1)
+            z = (z * probs).sum(dim=1)
+            # z: (batch_sz, 1, height, width)
+        else:
+            raise ValueError(f"Aggregation method '{self.agg_method}' is not valid.")
+        return z
 
 
 def avg_rmse(y, z):
@@ -37,16 +79,28 @@ def avg_rmse(y, z):
 
 class TemporalPixelRegression(pl.LightningModule):
     def config_task(self) -> None:
-        if self.hparams["model_name"] == "s1_linear_regression":
-            self.model = S1MeanWrapper(LinearPixelRegression(4, 1))
+        # TODO infer in_channels and example_input_array
+        in_channels = self.hparams['model_args']['in_channels']
+        self.example_input_array = torch.Tensor(1, in_channels, 256, 256)
+        if self.hparams['model_name'] == 'pixel_linear_regression':
+            self.model = PixelLinearRegression(in_channels, 1)
+        elif self.hparams['model_name'] == 'pixel_mlp':
+            hidden_channels = self.hparams['model_args']['hidden_channels']
+            self.model = PixelMLP(in_channels, hidden_channels, 1)
+        elif self.hparams['model_name'] == 'unet':
+            self.model = smp.Unet(
+                encoder_name=self.hparams['model_args']['encoder_name'],
+                in_channels=in_channels, encoder_weights=None,
+                classes=1, activation=None)
+        elif self.hparams['model_name'] == 'temporal_unet':
+            self.example_input_array = torch.Tensor(1, 12, in_channels, 256, 256)
+            self.model = TemporalUNet(**self.hparams['model_args'])
         else:
             raise ValueError(
-                f"Model type '{self.hparams['model_name']}' is not valid. "
-                f"Currently, only supports 's1_linear_regression'."
-            )
-        self.example_input_array = torch.Tensor(1, 12, 15, 256, 256)
+                f"Model type '{self.hparams['model_name']}' is not valid. ")
 
-    def __init__(self, model_name, learning_rate, learning_rate_schedule_patience) -> None:
+    def __init__(self, model_name, learning_rate, learning_rate_schedule_patience,
+                 model_args):
         super().__init__()
         self.save_hyperparameters()
         self.config_task()
@@ -111,7 +165,4 @@ class BiomassPredictionWriter(BasePredictionWriter):
             with rasterio.open(out_path, 'w', dtype=rasterio.float32, count=1,
                                height=_prediction.shape[1],
                                width=_prediction.shape[2]) as dst:
-                dst.write(_prediction[0], 1)
-
-
-
+                dst.write(_prediction[0].cpu().numpy(), 1)

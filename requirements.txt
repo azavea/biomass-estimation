@@ -9,3 +9,5 @@ awscli
 s3fs
 multiprocess==0.70.14
 omegaconf==2.3.0
+tqdm==4.64.1
+segmentation-models-pytorch==0.3.1

@@ -1,0 +1,24 @@
+trainer:
+  devices: 1
+  accelerator: gpu
+  min_epochs: 5
+  max_epochs: 20
+  benchmark: True
+experiment:
+  name: "simple_baseline"
+  task:
+    model_name: "pixel_linear_regression"
+    model_args:
+      in_channels: 4
+      hidden_sz: 128
+    learning_rate: 1e-3
+    learning_rate_schedule_patience: 5
+  datamodule:
+    root_dir: ${program.data_dir}
+    train_ratio: 0.8
+    batch_size: 20
+    num_workers: 4
+    dataset_limit: None
+    preprocess:
+      bands: "s1"
+      agg: "mean"
