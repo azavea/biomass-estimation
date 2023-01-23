@@ -6,6 +6,7 @@ trainer:
   benchmark: True
 experiment:
   name: "best_month_unet"
+  wandb_project: "biomass"
   task:
     model_name: "unet"
     model_args:
@@ -18,7 +19,7 @@ experiment:
     train_ratio: 0.8
     batch_size: 20
     num_workers: 4
-    dataset_limit: None
+    dataset_limit: null
     use_best_month: True
     month_items: True
     transforms:

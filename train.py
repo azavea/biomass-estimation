@@ -12,6 +12,7 @@ import pytorch_lightning as pl
 from pytorch_lightning import loggers as pl_loggers
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 import s3fs
+from pytorch_lightning.loggers import WandbLogger
 
 from biomass.models import TemporalPixelRegression, BiomassPredictionWriter
 from biomass.dataset import BiomassDataModule
@@ -68,6 +69,9 @@ def main(conf: DictConfig) -> None:
 
     if conf.program.train:
         csv_logger = pl_loggers.CSVLogger(conf.program.log_dir, name=experiment_name)
+        wandb_logger = WandbLogger(
+            project=conf.experiment.wandb_project,
+            name=experiment_name)
 
         monitor_metric = 'val_loss'
         mode = 'min'
@@ -82,7 +86,7 @@ def main(conf: DictConfig) -> None:
         trainer_args = OmegaConf.to_object(conf.trainer)
         trainer_args['callbacks'] = [
             checkpoint_callback, early_stopping_callback, pred_writer]
-        trainer_args['logger'] = csv_logger
+        trainer_args['logger'] = [csv_logger, wandb_logger]
         trainer_args['default_root_dir'] = experiment_dir
 
         trainer = pl.Trainer(**trainer_args)
