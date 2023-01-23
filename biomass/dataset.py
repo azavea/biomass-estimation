@@ -52,7 +52,7 @@ class BiomassMetadata():
 
 class BiomassDataset(Dataset):
     def __init__(self, root_dir='data', split='train', use_best_month=False,
-                 month_items=False, transform=None, no_labels=False):
+                 month_items=False, transform=None, no_labels=False, chip_ids=None):
         if split not in ['train', 'test']:
             raise Exception(f'{split} is not a valid split')
 
@@ -72,7 +72,7 @@ class BiomassDataset(Dataset):
         self.best_months_df = pandas.read_csv(
             join(self.root_dir, f'TILE_LIST_BEST_MONTHS{suffix}.csv'))
 
-        self.chip_ids = self.metadata.get_chip_ids(self.split)
+        split_chip_ids = self.metadata.get_chip_ids(self.split)
         self.chip_id_month_pairs = []
 
         if use_best_month:
@@ -91,7 +91,14 @@ class BiomassDataset(Dataset):
             else:
                 self.chip_id_month_pairs = [
                     (chip_id, all_month_inds)
-                    for chip_id in self.chip_ids]
+                    for chip_id in split_chip_ids]
+
+        if chip_ids is not None:
+            chip_ids = set(chip_ids)
+            self.chip_id_month_pairs = [
+                (chip_id, months)
+                for chip_id, months in self.chip_id_month_pairs
+                if chip_id in chip_ids]
 
     def __len__(self):
         return len(self.chip_id_month_pairs)
