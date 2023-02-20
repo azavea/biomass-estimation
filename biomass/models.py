@@ -99,8 +99,13 @@ class TemporalPixelRegression(pl.LightningModule):
             raise ValueError(
                 f"Model type '{self.hparams['model_name']}' is not valid. ")
 
+        loss = self.hparams['loss']
+        self.loss = loss
+        if loss not in ['rmse', 'mae']:
+            raise ValueError(f'{loss} is not valid.')
+
     def __init__(self, model_name, learning_rate, learning_rate_schedule_patience,
-                 model_args):
+                 learning_rate_schedule_threshold, loss, model_args):
         super().__init__()
         self.save_hyperparameters()
         self.config_task()
@@ -108,23 +113,29 @@ class TemporalPixelRegression(pl.LightningModule):
     def forward(self, x):
         return self.model(x)
 
-    def training_step(self, batch, batch_idx):
+    def step(self, split, batch, batch_idx):
         x, y, chip_metadata = batch
         z = self.forward(x)
-        loss = avg_rmse(y, z)
-        log_dict = {'train_loss': loss}
+        # y is (batch_sz, height, width)
+        # ensure z is the same shape if it is (batch_sz, 1, height, width)
+        if z.dim() == 4 and z.shape[1] == 1:
+            z = z.squeeze(1)
+        mae = torch.nn.functional.l1_loss(y, z)
+        rmse = avg_rmse(y, z)
+        if self.loss == 'mae':
+            loss = mae
+        elif self.loss == 'rmse':
+            loss = rmse
+        log_dict = {f'{split}_loss': loss, f'{split}_mae': mae, f'{split}_rmse': rmse}
         self.log_dict(
             log_dict, on_step=False, on_epoch=True, batch_size=x.shape[0])
         return loss
 
+    def training_step(self, batch, batch_idx):
+        return self.step('train', batch, batch_idx)
+
     def validation_step(self, batch, batch_idx):
-        x, y, chip_metadata = batch
-        z = self.forward(x)
-        loss = avg_rmse(y, z)
-        log_dict = {'val_loss': loss}
-        self.log_dict(
-            log_dict, on_step=False, on_epoch=True, batch_size=x.shape[0])
-        return loss
+        return self.step('val', batch, batch_idx)
 
     def predict_step(self, batch, batch_idx):
         x, chip_metadata = batch
@@ -146,6 +157,7 @@ class TemporalPixelRegression(pl.LightningModule):
                 "scheduler": ReduceLROnPlateau(
                     optimizer,
                     patience=self.hparams["learning_rate_schedule_patience"],
+                    threshold=self.hparams["learning_rate_schedule_threshold"],
                 ),
                 "monitor": "val_loss",
             },
