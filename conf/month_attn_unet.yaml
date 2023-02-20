@@ -1,0 +1,33 @@
+trainer:
+  devices: 1
+  accelerator: gpu
+  min_epochs: 10
+  max_epochs: 30
+  benchmark: True
+  precision: 16
+experiment:
+  task:
+    model_name: "temporal_unet"
+    model_args:
+      in_channels: 15
+      encoder_name: "resnet18"
+      agg_method: "month_attn"
+    learning_rate: 1e-3
+    learning_rate_schedule_patience: 5
+    learning_rate_schedule_threshold: 0.1
+    loss: "rmse"
+  datamodule:
+    root_dir: ${program.data_dir}
+    train_ratio: 0.8
+    batch_size: 4
+    num_workers: 4
+    dataset_limit: null
+    use_best_month: False
+    month_items: False
+    jpg_format: True
+    transforms:
+      - name: sentinel_band_normalize
+        norm_x: False
+        norm_y: True
+      - name: select_bands
+        bands: all

@@ -3,24 +3,31 @@ from torchvision.transforms import Compose
 
 
 class SentinelBandNormalize():
+    def __init__(self, norm_x=True, norm_y=True):
+        self.norm_x = norm_x
+        self.norm_y = norm_y
+
     def __call__(self, item):
         x, y = item
-        x = x.clone()
-        s1 = x[:, 0:4, :, :]
-        s2 = x[:, 4:14, :, :]
-        clp = x[:, 14:15, :, :]
 
-        s1[s1 == -9999] = -50
-        s1 += 50
-        s1 /= 50
+        if self.norm_x:
+            x = x.clone()
+            s1 = x[:, 0:4, :, :]
+            s2 = x[:, 4:14, :, :]
+            clp = x[:, 14:15, :, :]
 
-        s2 /= 10_000
+            s1[s1 == -9999] = -50
+            s1 += 50
+            s1 /= 50
 
-        clp[clp == 255] = 100
-        clp /= 100
+            s2 /= 10_000
 
-        x = torch.cat([s1, s2, clp], dim=1)
-        if y is not None:
+            clp[clp == 255] = 100
+            clp /= 100
+
+            x = torch.cat([s1, s2, clp], dim=1)
+
+        if y is not None and self.norm_y:
             y = torch.clamp(y, 0, 400)
 
         return (x, y)
@@ -63,7 +70,9 @@ def build_transform(transform_dicts):
     transforms = []
     for transform_dict in transform_dicts:
         if transform_dict['name'] == 'sentinel_band_normalize':
-            transform = SentinelBandNormalize()
+            transform = SentinelBandNormalize(
+                norm_x=transform_dict.get('norm_x', True),
+                norm_y=transform_dict.get('norm_y', True))
         elif transform_dict['name'] == 'select_bands':
             transform = SelectBands(transform_dict['bands'])
         elif transform_dict['name'] == 'aggregate_months':
