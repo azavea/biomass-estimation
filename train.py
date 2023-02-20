@@ -6,16 +6,19 @@ from typing import Any, Dict, Tuple, Type, cast
 import warnings
 import zipfile
 import shutil
+import subprocess
 
 from omegaconf import DictConfig, OmegaConf
 import pytorch_lightning as pl
 from pytorch_lightning import loggers as pl_loggers
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-import s3fs
+from pytorch_lightning.callbacks import (
+    ModelCheckpoint, LearningRateMonitor)
 from pytorch_lightning.loggers import WandbLogger
+import torch
+from tqdm import tqdm
 
 from biomass.models import TemporalPixelRegression, BiomassPredictionWriter
-from biomass.dataset import BiomassDataModule
+from biomass.dataset import BiomassDataModule, BiomassDataset
 
 
 def set_up_omegaconf() -> DictConfig:
@@ -37,68 +40,119 @@ def set_up_omegaconf() -> DictConfig:
 
 
 def main(conf: DictConfig) -> None:
-    experiment_name = conf.experiment.name
+    run_name = conf.program.run_name
+
     if os.path.isfile(conf.program.output_dir):
         raise NotADirectoryError('`program.output_dir` must be a directory')
-    os.makedirs(conf.program.output_dir, exist_ok=True)
+    output_dir = conf.program.output_dir
+    os.makedirs(output_dir, exist_ok=True)
 
-    experiment_dir = join(conf.program.output_dir, experiment_name)
-    os.makedirs(experiment_dir, exist_ok=True)
+    if len(os.listdir(output_dir)) > 0:
+        if conf.program.overwrite:
+            warnings.warn(
+                f'WARNING! The run output directory, {output_dir}, already exists, '
+                'we might overwrite data in it!')
+        else:
+            raise FileExistsError(
+                f"The run output directory, {output_dir}, already exists and isn't "
+                "empty. We don't want to overwrite any existing results, exiting..."
+            )
+
+        if conf.program.clear_output_dir:
+            shutil.rmtree(output_dir)
+            os.makedirs(output_dir, exist_ok=True)
+
     pred_dir = join(conf.program.output_dir, 'test-preds')
     os.makedirs(pred_dir, exist_ok=True)
     pred_path = join(conf.program.output_dir, 'test-preds.zip')
 
-    if len(os.listdir(experiment_dir)) > 0:
-        if conf.program.overwrite:
-            warnings.warn(
-                f'WARNING! The experiment directory, {experiment_dir}, already exists, '
-                'we might overwrite data in it!')
-        else:
-            raise FileExistsError(
-                f"The experiment directory, {experiment_dir}, already exists and isn't "
-                "empty. We don't want to overwrite any existing results, exiting..."
-            )
-
-    with open(join(experiment_dir, 'experiment_config.yaml'), 'w') as f:
+    with open(join(output_dir, 'experiment_config.yaml'), 'w') as f:
         OmegaConf.save(config=conf, f=f)
 
     task_args = OmegaConf.to_object(conf.experiment.task)
     task = TemporalPixelRegression(**task_args)
     datamodule_args = OmegaConf.to_object(conf.experiment.datamodule)
     datamodule = BiomassDataModule(**datamodule_args)
+    datamodule.setup()
+
+    csv_logger = pl_loggers.CSVLogger(conf.program.log_dir, name=run_name)
+    wandb_logger = None
+    if conf.program.wandb_project:
+        wandb_logger = WandbLogger(
+            project=conf.program.wandb_project,
+            name=run_name)
+        wandb_logger.experiment.config.update({
+            'trainer': dict(conf.trainer), 'experiment': dict(conf.experiment)})
+
+    monitor_metric = 'val_loss'
+    mode = 'min'
+
+    checkpoint_callback = ModelCheckpoint(
+        monitor=monitor_metric, dirpath=output_dir, save_top_k=1, save_last=True)
+    lr_monitor = LearningRateMonitor()
+    pred_writer = BiomassPredictionWriter(
+        output_dir=pred_dir, write_interval='batch')
+
+    trainer_args = OmegaConf.to_object(conf.trainer)
+    trainer_args['callbacks'] = [
+        checkpoint_callback, lr_monitor, pred_writer]
+    trainer_args['logger'] = [csv_logger]
+    if wandb_logger is not None:
+        trainer_args['logger'].append(wandb_logger)
+    trainer_args['default_root_dir'] = output_dir
+
+    trainer = pl.Trainer(**trainer_args)
+
+    if conf.program.plot_dataset_samples > 0:
+        train_ds = datamodule.train_dataset
+        val_ds = datamodule.val_dataset
+        train_plot_dir = join(output_dir, 'dataset-plots')
+        os.makedirs(train_plot_dir, exist_ok=True)
+        out_paths = []
+        for ind in tqdm(range(conf.program.plot_dataset_samples),
+                        desc='Plotting dataset samples'):
+            if ind < len(train_ds):
+                out_path = join(train_plot_dir, f'train-{ind}.jpg')
+                out_paths.append(out_path)
+                x, y, chip_metadata = train_ds[ind]
+                BiomassDataset.plot_sample(x, y, chip_metadata, out_path=out_path)
+            if ind < len(val_ds):
+                out_path = join(train_plot_dir, f'val-{ind}.jpg')
+                out_paths.append(out_path)
+                x, y, chip_metadata = val_ds[ind]
+                BiomassDataset.plot_sample(x, y, chip_metadata, out_path=out_path)
+        if wandb_logger is not None:
+            wandb_logger.log_image(key='dataset-plots', images=out_paths)
 
     if conf.program.train:
-        csv_logger = pl_loggers.CSVLogger(conf.program.log_dir, name=experiment_name)
-        wandb_logger = WandbLogger(
-            project=conf.experiment.wandb_project,
-            name=experiment_name)
-
-        monitor_metric = 'val_loss'
-        mode = 'min'
-
-        checkpoint_callback = ModelCheckpoint(
-            monitor=monitor_metric, dirpath=experiment_dir, save_top_k=1, save_last=True)
-        early_stopping_callback = EarlyStopping(
-            monitor=monitor_metric, min_delta=0.00, patience=18, mode=mode)
-        pred_writer = BiomassPredictionWriter(
-            output_dir=pred_dir, write_interval='batch')
-
-        trainer_args = OmegaConf.to_object(conf.trainer)
-        trainer_args['callbacks'] = [
-            checkpoint_callback, early_stopping_callback, pred_writer]
-        trainer_args['logger'] = [csv_logger, wandb_logger]
-        trainer_args['default_root_dir'] = experiment_dir
-
-        trainer = pl.Trainer(**trainer_args)
-
         if trainer_args.get('auto_lr_find'):
             trainer.tune(model=task, datamodule=datamodule)
-
         trainer.fit(model=task, datamodule=datamodule)
 
     if conf.program.predict:
-        ckpt_path = join(experiment_dir, 'last.ckpt')
+        ckpt_path = join(output_dir, 'last.ckpt')
         task = TemporalPixelRegression.load_from_checkpoint(ckpt_path)
+
+        if conf.program.plot_predictions > 0:
+            val_ds = datamodule.val_dataset
+            pred_plot_dir = join(output_dir, 'prediction-plots')
+            out_paths = []
+            os.makedirs(pred_plot_dir, exist_ok=True)
+            task.eval()
+            with torch.no_grad():
+                for ind in tqdm(range(conf.program.plot_predictions),
+                                desc='Plotting predictions'):
+                    if ind < len(val_ds):
+                        x, y, chip_metadata = val_ds[ind]
+                        z = task(x.unsqueeze(0))
+                        out_path = join(pred_plot_dir, f'pred-{ind}.jpg')
+                        BiomassDataset.plot_sample(
+                            x, y.squeeze(), chip_metadata, z=z.squeeze(),
+                            out_path=out_path)
+                        out_paths.append(out_path)
+            if wandb_logger is not None:
+                wandb_logger.log_image(key="prediction-plots", images=out_paths)
+
         trainer.predict(task, datamodule=datamodule, return_predictions=False)
 
         with zipfile.ZipFile(pred_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -108,9 +162,9 @@ def main(conf: DictConfig) -> None:
         shutil.rmtree(pred_dir)
 
     if conf.program.s3_output_uri:
-        s3 = s3fs.S3FileSystem()
-        s3.put(conf.program.output_dir,
-               join(conf.program.s3_output_uri, conf.experiment.name), recursive=True)
+        subprocess.run(
+            ['aws', 's3', 'sync', output_dir,
+             join(conf.program.s3_output_uri, conf.program.run_name)])
 
 
 if __name__ == '__main__':
