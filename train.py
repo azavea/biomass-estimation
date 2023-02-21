@@ -146,8 +146,12 @@ def main(conf: DictConfig) -> None:
                         x, y, chip_metadata = val_ds[ind]
                         z = task(x.unsqueeze(0))
                         out_path = join(pred_plot_dir, f'pred-{ind}.jpg')
+                        if isinstance(z, dict):
+                            z['output'] = z['output'].squeeze()
+                            z['month_weights'] = z['month_weights'].squeeze()
+                            z['month_outputs'] = z['month_outputs'].squeeze()
                         BiomassDataset.plot_sample(
-                            x, y.squeeze(), chip_metadata, z=z.squeeze(),
+                            x, y.squeeze(), chip_metadata, z=z,
                             out_path=out_path)
                         out_paths.append(out_path)
             if wandb_logger is not None:

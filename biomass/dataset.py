@@ -282,12 +282,23 @@ class BiomassDataset(Dataset):
     def plot_sample(x, y, chip_metadata, z=None, out_path=None):
         if x.dim() == 3:
             x = x.unsqueeze(0)
+
+        month_weights = None
+        month_outputs = None
+        if z is not None:
+            if isinstance(z, dict):
+                if 'month_weights' in z:
+                    month_weights = z['month_weights']
+                if 'month_outputs' in z:
+                    month_outputs = z['month_outputs']
+                z = z['output']
+
         nrows = x.shape[0] + 1
-        ncols = 17
+        ncols = 18
         s1_masks = chip_metadata.get('s1_masks')
         s2_masks = chip_metadata.get('s2_masks')
         months = chip_metadata['months']
-        col_names = BiomassMetadata.bands + ['S1 Mask', 'S2 Mask']
+        col_names = BiomassMetadata.bands + ['S1 Mask', 'S2 Mask', 'Month Output']
 
         fig, axs = plt.subplots(
             nrows, ncols, constrained_layout=True, figsize=(1.5 * ncols, 1.5 * nrows),
@@ -295,32 +306,45 @@ class BiomassDataset(Dataset):
 
         for row_ind, row_axs in enumerate(axs):
             if row_ind == nrows - 1:
-                # plot the label in the last row
+                # plot the label and attention weights in the last row
                 for col_ind, ax in enumerate(row_axs):
-                    if y is not None and col_ind == 0:
+                    remove_ticks = True
+                    if col_ind == 0 and y is not None:
                         ax.imshow(y)
                         ax.set_title('Biomass GT')
-                    if z is not None and col_ind == 1:
+                    elif col_ind == 1 and z is not None:
                         ax.imshow(z)
                         ax.set_title('Biomass Prediction')
-                    ax.set_xticks([])
-                    ax.set_yticks([])
+                    elif col_ind == 2 and month_weights is not None:
+                        ax.bar(np.arange(12), month_weights)
+                        ax.set_title('Month Attention')
+                        remove_ticks = False
+                    if remove_ticks:
+                        ax.set_xticks([])
+                        ax.set_yticks([])
             else:
                 for col_ind, ax in enumerate(row_axs):
-                    # Add S1 and S2 masks to the last columns.
-                    if col_ind == 15:
-                        if s1_masks is not None:
-                            _x = s1_masks[row_ind]
-                    elif col_ind == 16:
-                        if s2_masks is not None:
-                            _x = s2_masks[row_ind]
-                    else:
+                    # Add S1 and S2 masks and month outputs to the last columns.
+                    _x = None
+                    if col_ind < 15:
                         _x = x[row_ind, col_ind, :, :]
+                    elif col_ind == 15 and s1_masks is not None:
+                        _x = s1_masks[row_ind]
+                    elif col_ind == 16 and s2_masks is not None:
+                        _x = s2_masks[row_ind]
+                    elif col_ind == 17 and month_outputs is not None:
+                        _x = month_outputs[row_ind]
 
-                    ax.imshow(_x)
+                    if _x is not None:
+                        ax.imshow(_x)
 
                     if col_ind == 0:
-                        ax.set_ylabel(BiomassMetadata.months[months[row_ind]])
+                        month = BiomassMetadata.months[months[row_ind]]
+                        label = (
+                            month if month_weights is None
+                            else f'{month}: ({month_weights[row_ind]:.2f})')
+                        ax.set_ylabel(label)
+
                     if row_ind == 0:
                         ax.set_title(col_names[col_ind])
 
