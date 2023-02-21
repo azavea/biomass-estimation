@@ -44,14 +44,18 @@ class TemporalUNet(nn.Module):
             classes=1, activation=None, aux_params=aux_params)
 
     def forward(self, x):
+        batch_sz, time = x.shape[0:2]
         # x: (batch_sz, time, channels, height, width)
         if self.agg_method == 'month_mean':
             z = self.unet(x.reshape(-1, *x.shape[2:]))
             # z: (batch_sz * time, 1, height, width)
             z = z.reshape(*x.shape[0:2], 1, *x.shape[3:])
             # z: (batch_sz, time, 1, height, width)
+            month_outputs = z.squeeze(2)
             z = z.mean(dim=1)
             # z: (batch_sz, 1, height, width)
+            weights = torch.full((batch_sz, time), 1.0 / time, device=x.device)
+            # weights: (batch_sz, time)
         elif self.agg_method == 'month_attn':
             z, logits = self.unet(x.reshape(-1, *x.shape[2:]))
             # z: (batch_sz * time, 1, height, width)
@@ -60,7 +64,10 @@ class TemporalUNet(nn.Module):
             logits = logits.reshape(*x.shape[0:2], 1)
             # z: (batch_sz, time, 1, height, width)
             # logits: (batch_sz, time, 1)
+            month_outputs = z.squeeze(2)
             probs = torch.softmax(logits, dim=1)
+            # weights: (batch_sz, time)
+            weights = probs.squeeze(2)
             # probs: (batch_sz, time, 1)
             probs = probs.unsqueeze(-1).unsqueeze(-1)
             # probs: (batch_sz, time, 1, 1, 1)
@@ -68,7 +75,7 @@ class TemporalUNet(nn.Module):
             # z: (batch_sz, 1, height, width)
         else:
             raise ValueError(f"Aggregation method '{self.agg_method}' is not valid.")
-        return z
+        return {'output': z, 'month_weights': weights, 'month_outputs': month_outputs}
 
 
 def avg_rmse(y, z):
@@ -116,6 +123,9 @@ class TemporalPixelRegression(pl.LightningModule):
     def step(self, split, batch, batch_idx):
         x, y, chip_metadata = batch
         z = self.forward(x)
+        if isinstance(z, dict):
+            z = z['output']
+
         # y is (batch_sz, height, width)
         # ensure z is the same shape if it is (batch_sz, 1, height, width)
         if z.dim() == 4 and z.shape[1] == 1:
@@ -171,9 +181,13 @@ class BiomassPredictionWriter(BasePredictionWriter):
 
     def write_on_batch_end(self, trainer, pl_module, prediction, batch_indices, batch,
                            batch_idx, dataloader_idx):
+        if isinstance(prediction, dict):
+            prediction = prediction['output']
         chip_ids = batch[1]['chip_id']
+
         for chip_id, _prediction in zip(chip_ids, prediction):
             out_path = join(self.output_dir, f'{chip_id}_agbm.tif')
+
             with rasterio.open(out_path, 'w', dtype=rasterio.float32, count=1,
                                height=_prediction.shape[1],
                                width=_prediction.shape[2]) as dst:
