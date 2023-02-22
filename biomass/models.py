@@ -59,47 +59,51 @@ class TemporalUNet(nn.Module):
 
         x = (torch.arange(12) / 12) * 2 * math.pi
         self.embeds = torch.vstack((torch.sin(x), torch.cos(x))).T
-        # self.embeds: (12, 2)
+        assert self.embeds.shape == (12, 2)
 
     def forward(self, x):
         batch_sz, times, channels, height, width = x.shape
         # x: (batch_sz, times, channels, height, width)
 
         if self.time_embed_method == 'add_inputs':
+            # Add month embedding as input channels
             embeds = self.embeds.to(x.device).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+            assert embeds.shape == (1, times, 2, 1, 1)
             embeds = embeds.expand(batch_sz, -1, -1, height, width)
-            # embeds: (batch_sz, times, 2, height, width)
+            assert embeds.shape == (batch_sz, times, 2, height, width)
             x = torch.cat((x, embeds), dim=2)
-            # x: (batch_sz, times, channels + 2, height, width)
+            assert x.shape == (batch_sz, times, channels + 2, height, width)
             channels += 2
 
         if self.agg_method == 'month_mean':
             z = self.unet(x.reshape(-1, *x.shape[2:]))
-            # z: (batch_sz * times, 1, height, width)
+            assert z.shape == (batch_sz * times, 1, height, width)
             z = z.reshape(*x.shape[0:2], 1, *x.shape[3:])
-            # z: (batch_sz, times, 1, height, width)
+            assert z.shape == (batch_sz, times, 1, height, width)
             month_outputs = z.squeeze(2)
+            assert month_outputs.shape == (batch_sz, times, height, width)
             z = z.mean(dim=1)
-            # z: (batch_sz, 1, height, width)
+            assert z.shape == (batch_sz, 1, height, width)
             weights = torch.full((batch_sz, times), 1.0 / times, device=x.device)
-            # weights: (batch_sz, times)
+            assert weights.shape == (batch_sz, times)
         elif self.agg_method == 'month_attn':
             z, logits = self.unet(x.reshape(-1, channels, height, width))
-            # z: (batch_sz * times, 1, height, width)
-            # logits: (batch_sz * times, 1)
+            assert z.shape == (batch_sz * times, 1, height, width)
+            assert logits.shape == (batch_sz * times, 1)
             z = z.reshape(batch_sz, times, 1, height, width)
             logits = logits.reshape(batch_sz, times, 1)
-            # z: (batch_sz, times, 1, height, width)
-            # logits: (batch_sz, times, 1)
+            assert z.shape == (batch_sz, times, 1, height, width)
+            assert logits.shape == (batch_sz, times, 1)
             month_outputs = z.squeeze(2)
+            assert month_outputs.shape == (batch_sz, times, height, width)
             probs = torch.softmax(logits, dim=1)
-            # weights: (batch_sz, times)
+            assert probs.shape == (batch_sz, times, 1)
             weights = probs.squeeze(2)
-            # probs: (batch_sz, times, 1)
+            assert weights.shape == (batch_sz, times)
             probs = probs.unsqueeze(-1).unsqueeze(-1)
-            # probs: (batch_sz, times, 1, 1, 1)
+            assert probs.shape == (batch_sz, times, 1, 1, 1)
             z = (z * probs).sum(dim=1)
-            # z: (batch_sz, 1, height, width)
+            assert z.shape == (batch_sz, 1, height, width)
         return {'output': z, 'month_weights': weights, 'month_outputs': month_outputs}
 
 
