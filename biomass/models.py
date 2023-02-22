@@ -1,6 +1,7 @@
 from argparse import ArgumentParser
 from typing import Any, Dict, cast
 from os.path import join
+import math
 
 import torch
 import torch.nn as nn
@@ -33,48 +34,72 @@ class PixelMLP(nn.Module):
 
 
 class TemporalUNet(nn.Module):
-    def __init__(self, in_channels, encoder_name='resnet18', agg_method='month_mean'):
+    def __init__(self, in_channels, encoder_name='resnet18', agg_method='month_mean',
+                 time_embed_method=None, encoder_weights=None):
         super().__init__()
+
+        if agg_method not in ['month_mean', 'month_attn']:
+            raise ValueError(f'agg_method={agg_method} is not a valid aggregation method')
+        if time_embed_method not in [None, 'add_inputs']:
+            raise ValueError(
+                f'time_embed_method={time_embed_method} is not '
+                'a valid time embedding method')
         self.agg_method = agg_method
+        self.time_embed_method = time_embed_method
+
         aux_params = (
             {'classes': 1, 'activation': None}
             if agg_method == 'month_attn' else None)
+        if time_embed_method == 'add_inputs':
+            in_channels += 2
         self.unet = smp.Unet(
-            encoder_name=encoder_name, in_channels=in_channels, encoder_weights=None,
+            encoder_name=encoder_name, in_channels=in_channels,
+            encoder_weights=encoder_weights,
             classes=1, activation=None, aux_params=aux_params)
 
+        x = (torch.arange(12) / 12) * 2 * math.pi
+        self.embeds = torch.vstack((torch.sin(x), torch.cos(x))).T
+        # self.embeds: (12, 2)
+
     def forward(self, x):
-        batch_sz, time = x.shape[0:2]
-        # x: (batch_sz, time, channels, height, width)
+        batch_sz, times, channels, height, width = x.shape
+        # x: (batch_sz, times, channels, height, width)
+
+        if self.time_embed_method == 'add_inputs':
+            embeds = self.embeds.to(x.device).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+            embeds = embeds.expand(batch_sz, -1, -1, height, width)
+            # embeds: (batch_sz, times, 2, height, width)
+            x = torch.cat((x, embeds), dim=2)
+            # x: (batch_sz, times, channels + 2, height, width)
+            channels += 2
+
         if self.agg_method == 'month_mean':
             z = self.unet(x.reshape(-1, *x.shape[2:]))
-            # z: (batch_sz * time, 1, height, width)
+            # z: (batch_sz * times, 1, height, width)
             z = z.reshape(*x.shape[0:2], 1, *x.shape[3:])
-            # z: (batch_sz, time, 1, height, width)
+            # z: (batch_sz, times, 1, height, width)
             month_outputs = z.squeeze(2)
             z = z.mean(dim=1)
             # z: (batch_sz, 1, height, width)
-            weights = torch.full((batch_sz, time), 1.0 / time, device=x.device)
-            # weights: (batch_sz, time)
+            weights = torch.full((batch_sz, times), 1.0 / times, device=x.device)
+            # weights: (batch_sz, times)
         elif self.agg_method == 'month_attn':
-            z, logits = self.unet(x.reshape(-1, *x.shape[2:]))
-            # z: (batch_sz * time, 1, height, width)
-            # logits: (batch_sz * time, 1)
-            z = z.reshape(*x.shape[0:2], 1, *x.shape[3:])
-            logits = logits.reshape(*x.shape[0:2], 1)
-            # z: (batch_sz, time, 1, height, width)
-            # logits: (batch_sz, time, 1)
+            z, logits = self.unet(x.reshape(-1, channels, height, width))
+            # z: (batch_sz * times, 1, height, width)
+            # logits: (batch_sz * times, 1)
+            z = z.reshape(batch_sz, times, 1, height, width)
+            logits = logits.reshape(batch_sz, times, 1)
+            # z: (batch_sz, times, 1, height, width)
+            # logits: (batch_sz, times, 1)
             month_outputs = z.squeeze(2)
             probs = torch.softmax(logits, dim=1)
-            # weights: (batch_sz, time)
+            # weights: (batch_sz, times)
             weights = probs.squeeze(2)
-            # probs: (batch_sz, time, 1)
+            # probs: (batch_sz, times, 1)
             probs = probs.unsqueeze(-1).unsqueeze(-1)
-            # probs: (batch_sz, time, 1, 1, 1)
+            # probs: (batch_sz, times, 1, 1, 1)
             z = (z * probs).sum(dim=1)
             # z: (batch_sz, 1, height, width)
-        else:
-            raise ValueError(f"Aggregation method '{self.agg_method}' is not valid.")
         return {'output': z, 'month_weights': weights, 'month_outputs': month_outputs}
 
 
@@ -123,6 +148,7 @@ class TemporalPixelRegression(pl.LightningModule):
     def step(self, split, batch, batch_idx):
         x, y, chip_metadata = batch
         z = self.forward(x)
+
         if isinstance(z, dict):
             z = z['output']
 
