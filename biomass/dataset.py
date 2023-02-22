@@ -293,68 +293,83 @@ class BiomassDataset(Dataset):
                     month_outputs = z['month_outputs']
                 z = z['output']
 
-        nrows = x.shape[0] + 1
+        nrows = x.shape[0] + 2
         ncols = 18
         s1_masks = chip_metadata.get('s1_masks')
         s2_masks = chip_metadata.get('s2_masks')
         months = chip_metadata['months']
         col_names = BiomassMetadata.bands + ['S1 Mask', 'S2 Mask', 'Month Output']
 
-        fig, axs = plt.subplots(
-            nrows, ncols, constrained_layout=True, figsize=(1.5 * ncols, 1.5 * nrows),
-            squeeze=False)
+        fig = plt.figure(
+            constrained_layout=True, figsize=(1.5 * ncols, 1.5 * nrows))
+        gs = fig.add_gridspec(nrows, ncols)
 
-        for row_ind, row_axs in enumerate(axs):
-            if row_ind == nrows - 1:
-                # plot the label and attention weights in the last row
-                for col_ind, ax in enumerate(row_axs):
-                    remove_ticks = True
-                    if col_ind == 0 and y is not None:
-                        ax.imshow(y)
-                        ax.set_title('Biomass GT')
-                    elif col_ind == 1 and z is not None:
-                        ax.imshow(z)
-                        ax.set_title('Biomass Prediction')
-                    elif col_ind == 2 and month_weights is not None:
-                        ax.bar(np.arange(12), month_weights)
-                        ax.set_title('Month Attention')
-                        remove_ticks = False
-                    if remove_ticks:
-                        ax.set_xticks([])
-                        ax.set_yticks([])
-            else:
-                for col_ind, ax in enumerate(row_axs):
-                    # Add S1 and S2 masks and month outputs to the last columns.
-                    _x = None
-                    if col_ind < 15:
-                        _x = x[row_ind, col_ind, :, :]
-                    elif col_ind == 15 and s1_masks is not None:
-                        _x = s1_masks[row_ind]
-                    elif col_ind == 16 and s2_masks is not None:
-                        _x = s2_masks[row_ind]
-                    elif col_ind == 17 and month_outputs is not None:
-                        _x = month_outputs[row_ind]
+        def remove_ticks(ax):
+            ax.set_xticks([])
+            ax.set_yticks([])
 
-                    if _x is not None:
-                        ax.imshow(_x)
+        for row_ind in range(x.shape[0]):
+            for col_ind in range(ncols):
+                ax = fig.add_subplot(gs[row_ind, col_ind])
 
-                    if col_ind == 0:
-                        month = BiomassMetadata.months[months[row_ind]]
-                        label = (
-                            month if month_weights is None
-                            else f'{month}: ({month_weights[row_ind]:.2f})')
-                        ax.set_ylabel(label)
+                # Add S1 and S2 masks and month outputs to the last columns.
+                _x = None
+                if col_ind < 15:
+                    _x = x[row_ind, col_ind, :, :]
+                elif col_ind == 15 and s1_masks is not None:
+                    _x = s1_masks[row_ind]
+                elif col_ind == 16 and s2_masks is not None:
+                    _x = s2_masks[row_ind]
+                elif col_ind == 17 and month_outputs is not None:
+                    _x = month_outputs[row_ind]
 
-                    if row_ind == 0:
-                        ax.set_title(col_names[col_ind])
+                if _x is not None:
+                    ax.imshow(_x)
 
-                    ax.set_xticks([])
-                    ax.set_yticks([])
+                if col_ind == 0:
+                    month = BiomassMetadata.months[months[row_ind]]
+                    label = (
+                        month if month_weights is None
+                        else f'{month}: ({month_weights[row_ind]:.2f})')
+                    ax.set_ylabel(label)
+
+                if row_ind == 0:
+                    ax.set_title(col_names[col_ind])
+                remove_ticks(ax)
+
+        # plot the labels and other chip-wide information in the last 2 rows
+        if y is not None:
+            ax = fig.add_subplot(gs[x.shape[0]:x.shape[0]+2, 0:2])
+            ax.imshow(y)
+            ax.set_title('Biomass GT')
+            remove_ticks(ax)
+        if z is not None:
+            ax = fig.add_subplot(gs[x.shape[0]:x.shape[0]+2, 2:4])
+            ax.imshow(z)
+            ax.set_title('Biomass Prediction')
+            remove_ticks(ax)
+        if y is not None and z is not None:
+            nb_samples = 1000
+            rand_indices = np.random.choice(
+                y.reshape(-1).shape[0], (nb_samples,), replace=False)
+            y_sample = y.reshape(-1)[rand_indices]
+            z_sample = z.reshape(-1)[rand_indices]
+            ax = fig.add_subplot(gs[x.shape[0]:x.shape[0]+2, 4:6])
+            ax.scatter(y_sample, z_sample, alpha=0.2)
+            max_val = max(y_sample.max(), z_sample.max())
+            ax.plot([0, max_val], [0, max_val])
+            ax.set_xlabel('GT')
+            ax.set_ylabel('Prediction')
+        if month_weights is not None:
+            ax = fig.add_subplot(gs[x.shape[0]:x.shape[0]+2, 6:8])
+            ax.bar(np.arange(12), month_weights)
+            ax.set_xlabel('Month')
+            ax.set_ylabel('Attention')
 
         if out_path:
             plt.savefig(
                 out_path, bbox_inches='tight', pad_inches=0.2, transparent=False,
-                dpi=300)
+                dpi=150)
         else:
             plt.show()
 
@@ -416,6 +431,7 @@ class BiomassDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             shuffle=self.shuffle_train,
             pin_memory=self.pin_memory,
+            persistent_workers=True,
         )
 
     def val_dataloader(self) -> DataLoader[Any]:
@@ -429,6 +445,7 @@ class BiomassDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             shuffle=False,
             pin_memory=self.pin_memory,
+            persistent_workers=True,
         )
 
     def predict_dataloader(self) -> DataLoader[Any]:
@@ -438,4 +455,5 @@ class BiomassDataModule(pl.LightningDataModule):
             num_workers=self.num_workers,
             shuffle=False,
             pin_memory=self.pin_memory,
+            persistent_workers=True,
         )
