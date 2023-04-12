@@ -285,20 +285,20 @@ class BiomassDataset(Dataset):
 
         month_weights = None
         month_outputs = None
+        month_pixel_weights = None
         if z is not None:
             if isinstance(z, dict):
-                if 'month_weights' in z:
-                    month_weights = z['month_weights']
-                if 'month_outputs' in z:
-                    month_outputs = z['month_outputs']
+                month_weights = z.get('month_weights')
+                month_pixel_weights = z.get('month_pixel_weights')
+                month_outputs = z.get('month_outputs')
                 z = z['output']
 
-        nrows = x.shape[0] + 2
-        ncols = 18
         s1_masks = chip_metadata.get('s1_masks')
         s2_masks = chip_metadata.get('s2_masks')
         months = chip_metadata['months']
-        col_names = BiomassMetadata.bands + ['S1 Mask', 'S2 Mask', 'Month Output']
+        col_names = BiomassMetadata.bands + ['S1 Mask', 'S2 Mask', 'Month Output', 'Attention Mask']
+        nrows = x.shape[0] + 2
+        ncols = len(col_names)
 
         fig = plt.figure(
             constrained_layout=True, figsize=(1.5 * ncols, 1.5 * nrows))
@@ -312,8 +312,8 @@ class BiomassDataset(Dataset):
             for col_ind in range(ncols):
                 ax = fig.add_subplot(gs[row_ind, col_ind])
 
-                # Add S1 and S2 masks and month outputs to the last columns.
                 _x = None
+                vmin, vmax = None, None
                 if col_ind < 15:
                     _x = x[row_ind, col_ind, :, :]
                 elif col_ind == 15 and s1_masks is not None:
@@ -322,9 +322,12 @@ class BiomassDataset(Dataset):
                     _x = s2_masks[row_ind]
                 elif col_ind == 17 and month_outputs is not None:
                     _x = month_outputs[row_ind]
+                elif col_ind == 18 and month_pixel_weights is not None:
+                    _x = month_pixel_weights[row_ind]
+                    vmin, vmax = 0, 1
 
                 if _x is not None:
-                    ax.imshow(_x)
+                    ax.imshow(_x, vmin=vmin, vmax=vmax)
 
                 if col_ind == 0:
                     month = BiomassMetadata.months[months[row_ind]]
@@ -340,12 +343,12 @@ class BiomassDataset(Dataset):
         # plot the labels and other chip-wide information in the last 2 rows
         if y is not None:
             ax = fig.add_subplot(gs[x.shape[0]:x.shape[0]+2, 0:2])
-            ax.imshow(y)
+            ax.imshow(y, vmin=0, vmax=400)
             ax.set_title('Biomass GT')
             remove_ticks(ax)
         if z is not None:
             ax = fig.add_subplot(gs[x.shape[0]:x.shape[0]+2, 2:4])
-            ax.imshow(z)
+            ax.imshow(z, vmin=0, vmax=400)
             ax.set_title('Biomass Prediction')
             remove_ticks(ax)
         if y is not None and z is not None:
@@ -410,8 +413,10 @@ class BiomassDataModule(pl.LightningDataModule):
             jpg_format=self.jpg_format)
         if self.dataset_limit is not None and self.dataset_limit < len(all_train_dataset):
             all_train_dataset = Subset(all_train_dataset, list(range(self.dataset_limit)))
+        train_sz = round(len(all_train_dataset) * self.train_ratio)
+        val_sz = len(all_train_dataset) - train_sz
         self.train_dataset, self.val_dataset = random_split(
-            all_train_dataset, [self.train_ratio, 1-self.train_ratio])
+            all_train_dataset, [train_sz, val_sz])
         self.predict_dataset = BiomassDataset(
             root_dir=self.root_dir, split='test', use_best_month=self.use_best_month,
             month_items=self.month_items, transform=transform, jpg_format=self.jpg_format)

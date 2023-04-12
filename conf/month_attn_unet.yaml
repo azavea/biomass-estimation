@@ -11,13 +11,15 @@ experiment:
     model_args:
       in_channels: 15
       encoder_name: "resnet18"
-      encoder_weights: "imagenet"
-      agg_method: "month_attn"
+      encoder_weights: null
+      agg_method: "month_pixel_attn"
       time_embed_method: "add_inputs"
     learning_rate: 1e-3
-    learning_rate_schedule_patience: 5
-    learning_rate_schedule_threshold: 0.1
+    lr_scheduler:
+      name: "CyclicLR"
     loss: "rmse"
+    month_loss: True
+    month_loss_scale: 1
   datamodule:
     root_dir: ${program.data_dir}
     train_ratio: 0.8

@@ -89,7 +89,7 @@ def main(conf: DictConfig) -> None:
 
     checkpoint_callback = ModelCheckpoint(
         monitor=monitor_metric, dirpath=output_dir, save_top_k=1, save_last=True)
-    lr_monitor = LearningRateMonitor()
+    lr_monitor = LearningRateMonitor(logging_interval='epoch')
     pred_writer = BiomassPredictionWriter(
         output_dir=pred_dir, write_interval='batch')
 
@@ -149,6 +149,7 @@ def main(conf: DictConfig) -> None:
                         if isinstance(z, dict):
                             z['output'] = z['output'].squeeze()
                             z['month_weights'] = z['month_weights'].squeeze()
+                            z['month_pixel_weights'] = z['month_pixel_weights'].squeeze()
                             z['month_outputs'] = z['month_outputs'].squeeze()
                         BiomassDataset.plot_sample(
                             x, y.squeeze(), chip_metadata, z=z,
