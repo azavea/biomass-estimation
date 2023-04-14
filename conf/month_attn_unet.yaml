@@ -16,10 +16,13 @@ experiment:
       time_embed_method: "add_inputs"
     learning_rate: 1e-3
     lr_scheduler:
-      name: "CyclicLR"
+      name: "ReduceLROnPlateau"
+      learning_rate_schedule_patience: 5
+      learning_rate_schedule_threshold: 0.1
     loss: "rmse"
     month_loss: True
     month_loss_scale: 1
+    loss_ignore_threshold: 400
   datamodule:
     root_dir: ${program.data_dir}
     train_ratio: 0.8
@@ -32,6 +35,6 @@ experiment:
     transforms:
       - name: sentinel_band_normalize
         norm_x: False
-        norm_y: True
+        norm_y: False
       - name: select_bands
         bands: all

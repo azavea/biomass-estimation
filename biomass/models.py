@@ -169,6 +169,7 @@ class TemporalPixelRegression(pl.LightningModule):
             raise ValueError(f'{loss} is not valid.')
         self.month_loss = self.hparams['month_loss']
         self.month_loss_scale = self.hparams['month_loss_scale']
+        self.loss_ignore_threshold = self.hparams.get('loss_ignore_threshold')
 
     def __init__(self, model_name, learning_rate, lr_scheduler,
                  loss, month_loss, month_loss_scale, model_args):
@@ -196,10 +197,18 @@ class TemporalPixelRegression(pl.LightningModule):
         assert z.shape == y.shape
         mae = torch.nn.functional.l1_loss(y, z)
         rmse = avg_rmse(y, z)
-        loss_fn = torch.nn.functional.l1_loss if self.loss == 'mae' else avg_rmse
+        _loss_fn = torch.nn.functional.l1_loss if self.loss == 'mae' else avg_rmse
+        def masked_loss_fn(y, z):
+            mask = y < self.loss_ignore_threshold
+            return _loss_fn(y[mask], z[mask])
+        loss_fn = (
+            masked_loss_fn
+            if self.loss_ignore_threshold is not None
+            else _loss_fn)
+
         loss = loss_fn(y, z)
         if self.month_loss:
-            # Make sure the month outputs are the same shape as y
+            # Make sure y and month_outputs are broadcastable.
             _y = y.unsqueeze(1)
             assert _y.shape == (batch_sz, 1, height, width)
             assert month_outputs.shape == (batch_sz, 12, height, width)
