@@ -38,7 +38,9 @@ class TemporalUNet(nn.Module):
                  time_embed_method=None, encoder_weights=None):
         super().__init__()
 
-        if agg_method not in ['month_mean', 'month_attn', 'month_pixel_attn']:
+        agg_methods = [
+            'month_mean', 'month_attn', 'month_pixel_attn', 'encoder_month_pixel_attn']
+        if agg_method not in agg_methods:
             raise ValueError(f'agg_method={agg_method} is not a valid aggregation method')
         if time_embed_method not in [None, 'add_inputs']:
             raise ValueError(
@@ -80,6 +82,7 @@ class TemporalUNet(nn.Module):
             channels += 2
 
         if self.agg_method == 'month_mean':
+            # Average inputs over time dimension to reduce to a non-temporal problem.
             z = self.unet(x.reshape(-1, *x.shape[2:]))
             assert z.shape == (batch_sz * times, 1, height, width)
             z = z.reshape(*x.shape[0:2], 1, *x.shape[3:])
@@ -91,6 +94,8 @@ class TemporalUNet(nn.Module):
             month_weights = torch.full((batch_sz, times), 1.0 / times, device=x.device)
             assert month_weights.shape == (batch_sz, times)
         elif self.agg_method == 'month_attn':
+            # UNet generates an output for each month and the final output is a weighted
+            # average over the months.
             z, logits = self.unet(x.reshape(-1, channels, height, width))
             assert z.shape == (batch_sz * times, 1, height, width)
             assert logits.shape == (batch_sz * times, 1)
@@ -110,6 +115,8 @@ class TemporalUNet(nn.Module):
             z = (z * probs).sum(dim=1)
             assert z.shape == (batch_sz, height, width)
         elif self.agg_method == 'month_pixel_attn':
+            # UNet generates an output for each month and a separate weight vector is
+            # generated for each pixel which is used to calculate the final output.
             out = self.unet(x.reshape(-1, channels, height, width))
             assert out.shape == (batch_sz * times, 2, height, width)
             z = out[:, 0, :, :]
@@ -129,6 +136,18 @@ class TemporalUNet(nn.Module):
 
             z = (z * month_pixel_weights).sum(dim=1)
             assert z.shape == (batch_sz, height, width)
+        elif self.agg_method == 'encoder_month_pixel_attn':
+            # Using the encoder, a feature map is generated for each month along with
+            # weights for each month-pixel. The set of features maps is reduced to a
+            # single feature map using a weighted average. This is passed through a
+            # UNet decoder to get the final output.
+
+            # Get the output of the backbone encoder for each month.
+            x = x.reshape(-1, channels, height, width)
+            assert x.shape == (batch_sz * times, channels, height, width)
+            features = self.unet.encoder(x)
+            out = self.unet.decoder(*features)
+            print(out)
         return {
             'output': z, 'month_weights': month_weights, 'month_outputs': month_outputs,
             'month_pixel_weights': month_pixel_weights
@@ -172,7 +191,8 @@ class TemporalPixelRegression(pl.LightningModule):
         self.loss_ignore_threshold = self.hparams.get('loss_ignore_threshold')
 
     def __init__(self, model_name, learning_rate, lr_scheduler,
-                 loss, month_loss, month_loss_scale, model_args):
+                 loss, month_loss, month_loss_scale, loss_ignore_threshold,
+                 model_args):
         super().__init__()
         self.save_hyperparameters()
         self.config_task()
@@ -228,9 +248,6 @@ class TemporalPixelRegression(pl.LightningModule):
     def predict_step(self, batch, batch_idx):
         x, chip_metadata = batch
         return self.forward(x)
-
-    def lr_scheduler_step(self, scheduler, optimizer_idx, metric):
-        scheduler.step()
 
     def configure_optimizers(self) -> Dict[str, Any]:
         """Initialize the optimizer and learning rate scheduler.

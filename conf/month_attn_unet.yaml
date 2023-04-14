@@ -12,7 +12,7 @@ experiment:
       in_channels: 15
       encoder_name: "resnet18"
       encoder_weights: null
-      agg_method: "month_pixel_attn"
+      agg_method: "encoder_month_pixel_attn"
       time_embed_method: "add_inputs"
     learning_rate: 1e-3
     lr_scheduler:
@@ -31,10 +31,10 @@ experiment:
     dataset_limit: null
     use_best_month: False
     month_items: False
-    jpg_format: True
+    jpg_format: False
     transforms:
       - name: sentinel_band_normalize
-        norm_x: False
+        norm_x: True
         norm_y: False
       - name: select_bands
         bands: all
