@@ -63,6 +63,12 @@ class TemporalUNet(nn.Module):
             encoder_weights=encoder_weights,
             classes=classes, activation=None, aux_params=aux_params)
 
+        if agg_method == 'month_pixel_attn':
+            self.attention_heads = nn.ModuleList([
+                PixelMLP(out_channels, out_channels, 1)
+                for out_channels in self.unet.encoder.out_channels[1:]
+            ])
+
         x = (torch.arange(12) / 12) * 2 * math.pi
         self.embeds = torch.vstack((torch.sin(x), torch.cos(x))).T
         assert self.embeds.shape == (12, 2)
@@ -141,12 +147,18 @@ class TemporalUNet(nn.Module):
             # weights for each month-pixel. The set of features maps is reduced to a
             # single feature map using a weighted average. This is passed through a
             # UNet decoder to get the final output.
-
-            # Get the output of the backbone encoder for each month.
-            x = x.reshape(-1, channels, height, width)
-            assert x.shape == (batch_sz * times, channels, height, width)
-            features = self.unet.encoder(x)
-            out = self.unet.decoder(*features)
+            features = self.unet.encoder(x.reshape(-1, channels, height, width))
+            for f in features:
+                assert f[0:2].shape == (batch_sz * times, channels) and f.dims == 4
+            logits = [attn(f) for attn, f in zip(self.attention_heads, features[1:])]
+            for l, f in zip(logits, features[1:]):
+                assert l.shape == f.shape
+            logits = [
+                l.reshape(batch_sz, times, *l.shape[1:])
+                for l in logits]
+            month_pixel_weights = [torch.softmax(l, dim=1) for l in logits]
+            reduced_features = [(w * f).mean() for w, f in zip(month_pixel_weights, features[1:])]
+            out = self.unet.decoder(*reduced_features)
             print(out)
         return {
             'output': z, 'month_weights': month_weights, 'month_outputs': month_outputs,
