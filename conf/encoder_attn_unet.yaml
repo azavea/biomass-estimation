@@ -20,8 +20,7 @@ experiment:
       learning_rate_schedule_patience: 5
       learning_rate_schedule_threshold: 0.1
     loss: "rmse"
-    month_loss: True
-    month_loss_scale: 1
+    month_loss: False
     loss_ignore_threshold: 400
   datamodule:
     root_dir: ${program.data_dir}

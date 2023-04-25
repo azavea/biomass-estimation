@@ -11,6 +11,14 @@ from pytorch_lightning.callbacks import BasePredictionWriter
 import rasterio
 import segmentation_models_pytorch as smp
 
+INPUT_MEAN = 'input_mean'
+OUTPUT_MONTH_ATTN = 'output_month_attn'
+OUTPUT_MONTH_PIXEL_ATTN = 'output_month_pixel_attn'
+ENCODER_MONTH_PIXEL_ATTN = 'encoder_month_pixel_attn'
+agg_methods = [
+    INPUT_MEAN, OUTPUT_MONTH_ATTN, OUTPUT_MONTH_PIXEL_ATTN,
+    ENCODER_MONTH_PIXEL_ATTN]
+
 
 class PixelLinearRegression(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -34,12 +42,10 @@ class PixelMLP(nn.Module):
 
 
 class TemporalUNet(nn.Module):
-    def __init__(self, in_channels, encoder_name='resnet18', agg_method='month_mean',
+    def __init__(self, in_channels, encoder_name='resnet18',agg_method=INPUT_MEAN,
                  time_embed_method=None, encoder_weights=None):
         super().__init__()
 
-        agg_methods = [
-            'month_mean', 'month_attn', 'month_pixel_attn', 'encoder_month_pixel_attn']
         if agg_method not in agg_methods:
             raise ValueError(f'agg_method={agg_method} is not a valid aggregation method')
         if time_embed_method not in [None, 'add_inputs']:
@@ -51,9 +57,9 @@ class TemporalUNet(nn.Module):
 
         aux_params = None
         classes = 1
-        if agg_method == 'month_attn':
+        if agg_method == INPUT_MEAN:
             aux_params = {'classes': 1, 'activation': None}
-        elif agg_method == 'month_pixel_attn':
+        elif agg_method == OUTPUT_MONTH_PIXEL_ATTN:
             classes = 2
 
         if time_embed_method == 'add_inputs':
@@ -63,10 +69,10 @@ class TemporalUNet(nn.Module):
             encoder_weights=encoder_weights,
             classes=classes, activation=None, aux_params=aux_params)
 
-        if agg_method == 'month_pixel_attn':
+        if agg_method == ENCODER_MONTH_PIXEL_ATTN:
             self.attention_heads = nn.ModuleList([
-                PixelMLP(out_channels, out_channels, 1)
-                for out_channels in self.unet.encoder.out_channels[1:]
+                PixelMLP(c, c, c)
+                for c in self.unet.encoder.out_channels[1:]
             ])
 
         x = (torch.arange(12) / 12) * 2 * math.pi
@@ -76,6 +82,8 @@ class TemporalUNet(nn.Module):
     def forward(self, x):
         batch_sz, times, channels, height, width = x.shape
         month_pixel_weights = None
+        month_weights = None
+        month_outputs = None
 
         if self.time_embed_method == 'add_inputs':
             # Add month embedding as input channels
@@ -87,7 +95,7 @@ class TemporalUNet(nn.Module):
             assert x.shape == (batch_sz, times, channels + 2, height, width)
             channels += 2
 
-        if self.agg_method == 'month_mean':
+        if self.agg_method == INPUT_MEAN:
             # Average inputs over time dimension to reduce to a non-temporal problem.
             z = self.unet(x.reshape(-1, *x.shape[2:]))
             assert z.shape == (batch_sz * times, 1, height, width)
@@ -99,7 +107,7 @@ class TemporalUNet(nn.Module):
             assert z.shape == (batch_sz, 1, height, width)
             month_weights = torch.full((batch_sz, times), 1.0 / times, device=x.device)
             assert month_weights.shape == (batch_sz, times)
-        elif self.agg_method == 'month_attn':
+        elif self.agg_method == OUTPUT_MONTH_ATTN:
             # UNet generates an output for each month and the final output is a weighted
             # average over the months.
             z, logits = self.unet(x.reshape(-1, channels, height, width))
@@ -120,7 +128,7 @@ class TemporalUNet(nn.Module):
 
             z = (z * probs).sum(dim=1)
             assert z.shape == (batch_sz, height, width)
-        elif self.agg_method == 'month_pixel_attn':
+        elif self.agg_method == OUTPUT_MONTH_PIXEL_ATTN:
             # UNet generates an output for each month and a separate weight vector is
             # generated for each pixel which is used to calculate the final output.
             out = self.unet(x.reshape(-1, channels, height, width))
@@ -142,14 +150,12 @@ class TemporalUNet(nn.Module):
 
             z = (z * month_pixel_weights).sum(dim=1)
             assert z.shape == (batch_sz, height, width)
-        elif self.agg_method == 'encoder_month_pixel_attn':
+        elif self.agg_method == ENCODER_MONTH_PIXEL_ATTN:
             # Using the encoder, a feature map is generated for each month along with
             # weights for each month-pixel. The set of features maps is reduced to a
             # single feature map using a weighted average. This is passed through a
             # UNet decoder to get the final output.
             features = self.unet.encoder(x.reshape(-1, channels, height, width))
-            for f in features:
-                assert f[0:2].shape == (batch_sz * times, channels) and f.dims == 4
             logits = [attn(f) for attn, f in zip(self.attention_heads, features[1:])]
             for l, f in zip(logits, features[1:]):
                 assert l.shape == f.shape
@@ -157,9 +163,13 @@ class TemporalUNet(nn.Module):
                 l.reshape(batch_sz, times, *l.shape[1:])
                 for l in logits]
             month_pixel_weights = [torch.softmax(l, dim=1) for l in logits]
-            reduced_features = [(w * f).mean() for w, f in zip(month_pixel_weights, features[1:])]
-            out = self.unet.decoder(*reduced_features)
-            print(out)
+            reduced_features = [
+                (w * f.reshape_as(w)).sum(dim=1)
+                for w, f in zip(month_pixel_weights, features[1:])]
+            # Pass None as a dummy value for the input to the encoder which isn't
+            # actually used by the decoder.
+            z = self.unet.segmentation_head(self.unet.decoder(None, *reduced_features))
+            assert z.shape == (batch_sz, 1, height, width)
         return {
             'output': z, 'month_weights': month_weights, 'month_outputs': month_outputs,
             'month_pixel_weights': month_pixel_weights
